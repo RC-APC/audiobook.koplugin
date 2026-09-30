@@ -88,6 +88,23 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
         })
     end
 
+    -- Always-visible shortcut to (re)configure the platform-native helper path,
+    -- independent of whether the NATIVE backend is currently active. This breaks
+    -- the first-run chicken-and-egg: the settings submenu above is hidden until
+    -- NATIVE is selected, but NATIVE cannot be selected until a path is set.
+    table.insert(menu, {
+        text_func = function()
+            local p = plugin:getSetting("native_helper_path", "")
+            if p == "" then
+                return "云端 TTS 助手路径（未设置）"
+            end
+            return "云端 TTS 助手路径：" .. p
+        end,
+        callback = function(touchmenu_instance)
+            MenuBuilder._showNativeHelperPathChooser(plugin, touchmenu_instance)
+        end,
+    })
+
     -- MBROLA voice selection (espeak-ng backend only).
     -- On Kobo devices with the MTK Bluetooth chip, only mb-en1 works
     -- reliably; all other MBROLA voices trigger mid-sentence audio repeats.
@@ -1483,6 +1500,34 @@ function MenuBuilder.buildNativeTtsSettingsMenu(plugin)
         end,
     })
 
+    -- Cloud TTS voice (timbre)
+    table.insert(menu, {
+        text_func = function()
+            local v = MenuBuilder._readCloudCfg(plugin, "VOICE")
+            if v == "" then
+                return _("Cloud TTS voice") .. ": " .. _("not set")
+            end
+            return _("Cloud TTS voice") .. ": " .. v
+        end,
+        callback = function(touchmenu_instance)
+            MenuBuilder._showCloudVoiceDialog(plugin, touchmenu_instance)
+        end,
+    })
+
+    -- Cloud TTS relay address
+    table.insert(menu, {
+        text_func = function()
+            local v = MenuBuilder._readCloudCfg(plugin, "RELAY_BASE")
+            if v == "" then
+                return _("Cloud TTS relay") .. ": " .. _("not set")
+            end
+            return _("Cloud TTS relay") .. ": " .. v
+        end,
+        callback = function(touchmenu_instance)
+            MenuBuilder._showCloudRelayDialog(plugin, touchmenu_instance)
+        end,
+    })
+
     -- Input encoding
     table.insert(menu, {
         text_func = function()
@@ -1654,6 +1699,133 @@ function MenuBuilder._showNativePrestepDialog(plugin, touchmenu_instance)
                     is_enter_default = true,
                     callback = function()
                         plugin:setSetting("native_prestep_command", dialog:getInputText())
+                        UIManager:close(dialog)
+                        if touchmenu_instance then
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+end
+
+--[[--
+Helpers to read/write the cloud TTS helper config (cloud_tts.cfg) that lives
+next to the helper script. This lets the user tune voice/timbre and relay
+address from the UI instead of editing the file by hand.
+--]]
+function MenuBuilder._cloudCfgPath(plugin)
+    local helper = plugin:getSetting("native_helper_path", "")
+    if helper == "" then return nil end
+    local dir = helper:match("^(.*)/[^/]*$") or helper:match("^(.*)\\[^\\]*$")
+    if not dir or dir == "" then dir = "." end
+    return dir .. "/cloud_tts.cfg"
+end
+
+function MenuBuilder._readCloudCfg(plugin, key)
+    local path = MenuBuilder._cloudCfgPath(plugin)
+    if not path then return "" end
+    local f = io.open(path, "r")
+    if not f then return "" end
+    for line in f:lines() do
+        local v = line:match("^%s*" .. key .. "%s*=%s*(.*)%s*$")
+        if v then f:close(); return v end
+    end
+    f:close()
+    return ""
+end
+
+function MenuBuilder._writeCloudCfg(plugin, key, value)
+    local path = MenuBuilder._cloudCfgPath(plugin)
+    if not path then return false end
+    local f = io.open(path, "r")
+    local lines = {}
+    local found = false
+    if f then
+        for line in f:lines() do
+            if line:match("^%s*" .. key .. "%s*=") then
+                table.insert(lines, key .. "=" .. value)
+                found = true
+            else
+                table.insert(lines, line)
+            end
+        end
+        f:close()
+    end
+    if not found then
+        table.insert(lines, key .. "=" .. value)
+    end
+    local tmp = path .. ".tmp"
+    local w = io.open(tmp, "w")
+    if not w then return false end
+    w:write(table.concat(lines, "\n") .. "\n")
+    w:close()
+    os.rename(tmp, path)
+    return true
+end
+
+--[[--
+Show an InputDialog for the cloud TTS voice (timbre).
+--]]
+function MenuBuilder._showCloudVoiceDialog(plugin, touchmenu_instance)
+    local InputDialog = require("ui/widget/inputdialog")
+    local current = MenuBuilder._readCloudCfg(plugin, "VOICE")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Cloud TTS voice"),
+        input = current,
+        input_hint = "zh-CN-XiaoxiaoNeural",
+        description = _(
+            "Cloud TTS voice / timbre. Examples:\n"
+            .. "• zh-CN-XiaoxiaoNeural — female, lively\n"
+            .. "• zh-CN-YunxiNeural — male, warm\n"
+            .. "• zh-CN-YunyangNeural — male, newscast\n"
+            .. "• zh-CN-XiaoyiNeural — female, soft"
+        ),
+        buttons = {
+            {
+                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        MenuBuilder._writeCloudCfg(plugin, "VOICE", dialog:getInputText())
+                        UIManager:close(dialog)
+                        if touchmenu_instance then
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+end
+
+--[[--
+Show an InputDialog for the cloud TTS relay base address.
+--]]
+function MenuBuilder._showCloudRelayDialog(plugin, touchmenu_instance)
+    local InputDialog = require("ui/widget/inputdialog")
+    local current = MenuBuilder._readCloudCfg(plugin, "RELAY_BASE")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Cloud TTS relay"),
+        input = current,
+        input_hint = "http://192.168.0.101:5000/tts",
+        description = _(
+            "Base address of the cloud TTS relay (without the ?text= query parameter)."
+        ),
+        buttons = {
+            {
+                { text = _("Cancel"), callback = function() UIManager:close(dialog) end },
+                {
+                    text = _("Save"),
+                    is_enter_default = true,
+                    callback = function()
+                        MenuBuilder._writeCloudCfg(plugin, "RELAY_BASE", dialog:getInputText())
                         UIManager:close(dialog)
                         if touchmenu_instance then
                             touchmenu_instance:updateItems()
