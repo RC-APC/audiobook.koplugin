@@ -1717,11 +1717,23 @@ next to the helper script. This lets the user tune voice/timbre and relay
 address from the UI instead of editing the file by hand.
 --]]
 function MenuBuilder._cloudCfgPath(plugin)
+    -- Prefer the configured native helper path (set during backend detection).
     local helper = plugin:getSetting("native_helper_path", "")
-    if helper == "" then return nil end
-    local dir = helper:match("^(.*)/[^/]*$") or helper:match("^(.*)\\[^\\]*$")
-    if not dir or dir == "" then dir = "." end
-    return dir .. "/cloud_tts.cfg"
+    if helper and helper ~= "" then
+        local dir = helper:match("^(.*)/[^/]*$") or helper:match("^(.*)\\[^\\]*$")
+        if dir and dir ~= "" then
+            return dir .. "/cloud_tts.cfg"
+        end
+    end
+    -- Fallback: the plugin's own directory (the helper ships next to main.lua).
+    -- This guarantees a resolvable path so the relay/voice dialog can always
+    -- save, instead of silently no-op'ing when native_helper_path is empty.
+    local pd = plugin.plugin_dir
+    if pd and pd ~= "" then
+        pd = pd:gsub("/+$", "")
+        return pd .. "/cloud_tts.cfg"
+    end
+    return "cloud_tts.cfg"
 end
 
 function MenuBuilder._readCloudCfg(plugin, key)
@@ -1757,13 +1769,50 @@ function MenuBuilder._writeCloudCfg(plugin, key, value)
     if not found then
         table.insert(lines, key .. "=" .. value)
     end
+    local content = table.concat(lines, "\n") .. "\n"
+    -- Atomic write: temp file + rename. Verify the value actually landed, and
+    -- surface a failure (plugin dir may be read-only on some devices) instead of
+    -- silently reporting success.
     local tmp = path .. ".tmp"
     local w = io.open(tmp, "w")
-    if not w then return false end
-    w:write(table.concat(lines, "\n") .. "\n")
+    if not w then
+        MenuBuilder._cloudCfgSaveFailed(plugin, path)
+        return false
+    end
+    w:write(content)
     w:close()
-    os.rename(tmp, path)
+    os.remove(path)
+    local ok = os.rename(tmp, path)
+    if not ok then
+        -- rename can fail across filesystems; retry with a direct overwrite.
+        local w2 = io.open(path, "w")
+        if w2 then w2:write(content); w2:close() end
+        if not w2 then
+            MenuBuilder._cloudCfgSaveFailed(plugin, path)
+            return false
+        end
+    end
+    if MenuBuilder._readCloudCfg(plugin, key) ~= value then
+        MenuBuilder._cloudCfgSaveFailed(plugin, path)
+        return false
+    end
     return true
+end
+
+-- Surface a save failure instead of failing silently (the plugin directory may be
+-- read-only on some devices). Tells the user to either edit the file manually or
+-- deploy the package that already has the relay address baked in.
+function MenuBuilder._cloudCfgSaveFailed(plugin, path)
+    logger.warn("CloudTTS: failed to write config at", path,
+        "- the plugin directory may be read-only. Edit cloud_tts.cfg manually,",
+        "or deploy the package that already contains your relay address.")
+    if UIManager and UIManager.show then
+        local Toast = require("ui/widget/toast")
+        UIManager:show(Toast:new{
+            text = _("未能保存配置（插件目录可能只读）。请手动编辑 cloud_tts.cfg，或使用已内置中继地址的版本。"),
+            timeout = 6,
+        })
+    end
 end
 
 --[[--
