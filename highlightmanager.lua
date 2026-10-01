@@ -690,6 +690,22 @@ function HighlightManager:_highlightSentenceRolling(sentence, parsed_data, doc, 
         vis_end = vis_start + matched_len - 1
     end
 
+    -- Whitespace-insensitive match.  built_text joins visible LINES with a
+    -- single space, so a CJK sentence (which has NO internal spaces) that wraps
+    -- across a line break is not a literal substring and the exact find above
+    -- misses it.  splitWords() treats a whole CJK sentence as one token, so the
+    -- word-level fallbacks below cannot recover it either.  Matching with all
+    -- whitespace ignored (and mapping the hit back onto built_text) catches the
+    -- wrapped phrase and keeps highlight + page-turn in sync with the audio.
+    if not vis_start then
+        local ws, we = Utils.findIgnoringSpaces(built_text, sent_text)
+        if ws and we then
+            vis_start = ws
+            vis_end = we
+            matched_len = vis_end - vis_start + 1
+        end
+    end
+
     if not vis_start and not contiguous_only then
         local a, b
         first_w, last_w, a, b = Utils.alignSentenceOnPage(sent_words, built_text)

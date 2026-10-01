@@ -399,4 +399,72 @@ function Utils.getMemTotalKb()
     return nil
 end
 
+--- Find `needle` inside `haystack` while IGNORING all whitespace, returning
+--- the (1-based, inclusive) range in the ORIGINAL haystack, or nil.
+---
+--- Why this exists: `_highlightSentenceRolling` builds `built_text` by
+--- concatenating on-screen LINE texts, inserting a single space at every line
+--- break.  A CJK sentence has no internal spaces, so when it wraps across two
+--- rendered lines the inserted space makes a plain `find(sentence.text)` miss.
+--- `Utils.splitWords` splits on whitespace, so a whole CJK sentence is ONE
+--- token and every word-level fallback degenerates to the same all-or-nothing
+--- substring test -- none of them can recover a space-wrapped CJK sentence.
+--- This matcher compares both strings with whitespace removed and maps the hit
+--- back onto the raw haystack, so a phrase that merely wrapped is still found.
+--- Text is compared byte-wise (UTF-8 safe: we only skip ASCII whitespace).
+--- @param haystack string  Text to search in (with possible line-break spaces)
+--- @param needle string    Phrase to locate (may contain spaces that the
+---                         haystack renders as line breaks)
+--- @return number|nil start, number|nil end  Positions in `haystack`
+function Utils.findIgnoringSpaces(haystack, needle)
+    if not haystack or not needle or needle == "" then return nil end
+
+    -- Reject if the needle has no non-space content.
+    local needle_stripped = needle:gsub("%s+", "")
+    if needle_stripped == "" then return nil end
+
+    -- Walk `haystack`, dropping whitespace, and record for every kept
+    -- codepoint: its byte offset in the stripped string AND its original
+    -- byte range in haystack.  We must map by BYTE offset (`find` returns a
+    -- byte position), so keep both tables.
+    local stripped = {}
+    local strip_byte = {}   -- strip-byte-offset (1-based) -> { s = , e = }
+    local n = #haystack
+    local i = 1
+    local so = 0            -- running byte length of the stripped string
+    while i <= n do
+        local b = haystack:byte(i)
+        -- Skip exactly the bytes Lua's "%s" matches (space, \t, \n, \v, \f,
+        -- \r) so the stripped haystack lines up with needle:gsub("%s+","").
+        if b == 0x20 or (b >= 0x09 and b <= 0x0D) then
+            i = i + 1
+        else
+            -- Copy one full UTF-8 codepoint so multibyte chars stay intact.
+            local len = 1
+            if b >= 0xF0 then len = 4
+            elseif b >= 0xE0 then len = 3
+            elseif b >= 0xC0 then len = 2 end
+            local chunk = haystack:sub(i, i + len - 1)
+            stripped[#stripped + 1] = chunk
+            -- Record the stripped-string byte position for each byte of this
+            -- codepoint, mapping back to the original haystack range.
+            for k = 1, len do
+                strip_byte[so + k] = { s = i, e = i + len - 1 }
+            end
+            so = so + len
+            i = i + len
+        end
+    end
+    local hay_stripped = table.concat(stripped)
+    if hay_stripped == "" then return nil end
+
+    local p = hay_stripped:find(needle_stripped, 1, true)
+    if not p then return nil end
+    local q = p + #needle_stripped - 1       -- byte range in the stripped string
+    local start_entry = strip_byte[p]
+    local end_entry = strip_byte[q]
+    if not start_entry or not end_entry then return nil end
+    return start_entry.s, end_entry.e
+end
+
 return Utils

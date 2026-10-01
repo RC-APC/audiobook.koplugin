@@ -521,7 +521,7 @@ function Audiobook:onDispatcherRegisterActions()
         title = _("Read aloud from current page"),
         reader = true,
     })
-    logger.warn("Audiobook cloud-TTS patch: BUILD 20261001c (prefetch ON + clip-validate, "
+    logger.warn("Audiobook cloud-TTS patch: BUILD 20261001cloud-tts (0.2.9 base + always-visible 4-voice chooser + half-filled relay placeholder + top-menu shows real cloud voice + embedded zh_CN l10n + CJK highlight fix, "
         .. "onTap double-tap, overlay auto-pause OFF) loaded — if you see this in crash.log the new files are live")
 end
 
@@ -695,6 +695,13 @@ function Audiobook:addToMainMenu(menu_items)
                     if self.tts_engine.backend == self.tts_engine.BACKENDS.PIPER then
                         local model_label = self:getSetting("piper_model_label", "default")
                         return T(_("Voice settings (Piper - %1)"), model_label)
+                    end
+                    if self.tts_engine.backend == self.tts_engine.BACKENDS.NATIVE
+                       or self.tts_engine.backend == self.tts_engine.BACKENDS.KINDLE_NATIVE then
+                        -- Cloud TTS: show the actual Chinese voice (changes with the
+                        -- four-choice picker), not the espeak default "English (GB)".
+                        local v = MenuBuilder._cloudVoiceLabel(self)
+                        return T(_("Voice settings (%1)"), v)
                     end
                     local voice_label = self:getSetting("tts_voice_label", "English (GB)")
                     local variant_label = self:getSetting("tts_variant_label", "")

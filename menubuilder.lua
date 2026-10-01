@@ -105,6 +105,58 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
         end,
     })
 
+    -- Cloud TTS voice: always-visible four-choice picker.
+    -- The original cloud voice/relay dialogs were buried inside
+    -- buildNativeTtsSettingsMenu (only shown when the NATIVE backend is active),
+    -- so users could not pick a voice at all. Expose a simple four-choice
+    -- picker here, next to the helper-path shortcut.
+    local cloud_voices = {
+        { id = "zh-CN-XiaoxiaoNeural", label = "晓晓 (Xiaoxiao · 女声·活泼)" },
+        { id = "zh-CN-YunxiNeural",    label = "云希 (Yunxi · 男声·温暖)" },
+        { id = "zh-CN-YunyangNeural",  label = "云扬 (Yunyang · 男声·播音)" },
+        { id = "zh-CN-XiaoyiNeural",   label = "晓伊 (Xiaoyi · 女声·柔和)" },
+    }
+    table.insert(menu, {
+        text_func = function()
+            local cur = MenuBuilder._readCloudCfg(plugin, "VOICE")
+            local lbl = cur
+            for _, v in ipairs(cloud_voices) do
+                if v.id == cur then lbl = v.label end
+            end
+            return "云端 TTS 音色：" .. (lbl ~= "" and lbl or "（未设置）")
+        end,
+        sub_item_table_func = function()
+            local sub = {}
+            for _, v in ipairs(cloud_voices) do
+                table.insert(sub, {
+                    text = v.label,
+                    checked_func = function()
+                        return MenuBuilder._readCloudCfg(plugin, "VOICE") == v.id
+                    end,
+                    callback = function(touchmenu_instance)
+                        MenuBuilder._writeCloudCfg(plugin, "VOICE", v.id)
+                        if touchmenu_instance then touchmenu_instance:updateItems() end
+                    end,
+                })
+            end
+            return sub
+        end,
+    })
+
+    -- Cloud TTS relay address: always-visible so users can fill the placeholder.
+    table.insert(menu, {
+        text_func = function()
+            local v = MenuBuilder._readCloudCfg(plugin, "RELAY_BASE")
+            if v == "" then
+                return "云端 TTS 中继地址：（未设置）"
+            end
+            return "云端 TTS 中继地址：" .. v
+        end,
+        callback = function(touchmenu_instance)
+            MenuBuilder._showCloudRelayDialog(plugin, touchmenu_instance)
+        end,
+    })
+
     -- MBROLA voice selection (espeak-ng backend only).
     -- On Kobo devices with the MTK Bluetooth chip, only mb-en1 works
     -- reliably; all other MBROLA voices trigger mid-sentence audio repeats.
@@ -1717,23 +1769,11 @@ next to the helper script. This lets the user tune voice/timbre and relay
 address from the UI instead of editing the file by hand.
 --]]
 function MenuBuilder._cloudCfgPath(plugin)
-    -- Prefer the configured native helper path (set during backend detection).
     local helper = plugin:getSetting("native_helper_path", "")
-    if helper and helper ~= "" then
-        local dir = helper:match("^(.*)/[^/]*$") or helper:match("^(.*)\\[^\\]*$")
-        if dir and dir ~= "" then
-            return dir .. "/cloud_tts.cfg"
-        end
-    end
-    -- Fallback: the plugin's own directory (the helper ships next to main.lua).
-    -- This guarantees a resolvable path so the relay/voice dialog can always
-    -- save, instead of silently no-op'ing when native_helper_path is empty.
-    local pd = plugin.plugin_dir
-    if pd and pd ~= "" then
-        pd = pd:gsub("/+$", "")
-        return pd .. "/cloud_tts.cfg"
-    end
-    return "cloud_tts.cfg"
+    if helper == "" then return nil end
+    local dir = helper:match("^(.*)/[^/]*$") or helper:match("^(.*)\\[^\\]*$")
+    if not dir or dir == "" then dir = "." end
+    return dir .. "/cloud_tts.cfg"
 end
 
 function MenuBuilder._readCloudCfg(plugin, key)
@@ -1747,6 +1787,20 @@ function MenuBuilder._readCloudCfg(plugin, key)
     end
     f:close()
     return ""
+end
+
+-- Map a cloud TTS VOICE id to a short friendly label for menu display.
+-- Kept in sync with the four-choice picker (cloud_voices) above.
+function MenuBuilder._cloudVoiceLabel(plugin)
+    local id = MenuBuilder._readCloudCfg(plugin, "VOICE")
+    if id == "" then return _("云端 TTS") end
+    local map = {
+        ["zh-CN-XiaoxiaoNeural"] = "晓晓",
+        ["zh-CN-YunxiNeural"]    = "云希",
+        ["zh-CN-YunyangNeural"]  = "云扬",
+        ["zh-CN-XiaoyiNeural"]   = "晓伊",
+    }
+    return map[id] or id
 end
 
 function MenuBuilder._writeCloudCfg(plugin, key, value)
@@ -1769,50 +1823,13 @@ function MenuBuilder._writeCloudCfg(plugin, key, value)
     if not found then
         table.insert(lines, key .. "=" .. value)
     end
-    local content = table.concat(lines, "\n") .. "\n"
-    -- Atomic write: temp file + rename. Verify the value actually landed, and
-    -- surface a failure (plugin dir may be read-only on some devices) instead of
-    -- silently reporting success.
     local tmp = path .. ".tmp"
     local w = io.open(tmp, "w")
-    if not w then
-        MenuBuilder._cloudCfgSaveFailed(plugin, path)
-        return false
-    end
-    w:write(content)
+    if not w then return false end
+    w:write(table.concat(lines, "\n") .. "\n")
     w:close()
-    os.remove(path)
-    local ok = os.rename(tmp, path)
-    if not ok then
-        -- rename can fail across filesystems; retry with a direct overwrite.
-        local w2 = io.open(path, "w")
-        if w2 then w2:write(content); w2:close() end
-        if not w2 then
-            MenuBuilder._cloudCfgSaveFailed(plugin, path)
-            return false
-        end
-    end
-    if MenuBuilder._readCloudCfg(plugin, key) ~= value then
-        MenuBuilder._cloudCfgSaveFailed(plugin, path)
-        return false
-    end
+    os.rename(tmp, path)
     return true
-end
-
--- Surface a save failure instead of failing silently (the plugin directory may be
--- read-only on some devices). Tells the user to either edit the file manually or
--- deploy the package that already has the relay address baked in.
-function MenuBuilder._cloudCfgSaveFailed(plugin, path)
-    logger.warn("CloudTTS: failed to write config at", path,
-        "- the plugin directory may be read-only. Edit cloud_tts.cfg manually,",
-        "or deploy the package that already contains your relay address.")
-    if UIManager and UIManager.show then
-        local Toast = require("ui/widget/toast")
-        UIManager:show(Toast:new{
-            text = _("未能保存配置（插件目录可能只读）。请手动编辑 cloud_tts.cfg，或使用已内置中继地址的版本。"),
-            timeout = 6,
-        })
-    end
 end
 
 --[[--

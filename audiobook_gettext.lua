@@ -442,26 +442,83 @@ if isAndroid then
 end
 ]]-- 
 
--- Resolve l10n next to this module (works for sideload / adb paths).
-local plugin_dir = (debug.getinfo(1, "S").source or ""):match("^@(.*/)[^/]*$") or "./"
-GetText.dirname = plugin_dir .. "l10n"
--- Fall back to DataStorage layout if the relative path is missing.
-do
-    local probe = io.open(GetText.dirname .. "/fr/" .. GetText.textdomain .. ".po", "r")
-    if probe then
-        probe:close()
-    else
+-- Simplified Chinese is the intended UI language for this plugin.
+--
+-- We bundle the catalog as a Lua module (l10n_zh_CN.lua) and load it via
+-- require(). This is the reliable path: KOReader's plugin loader serves .lua
+-- files from *inside* a .koplugin ZIP, but raw io.open() CANNOT read files from
+-- inside a ZIP. The original gettext PO loader relied on io.open, so on any
+-- device where the plugin was installed as a raw .koplugin (or where the l10n
+-- directory could not be located) the catalog silently failed to load and the
+-- entire UI fell back to English. require() has no such limitation.
+local embedded_ok, l10n_data = pcall(require, "l10n_zh_CN")
+if embedded_ok and l10n_data and l10n_data.translation then
+    GetText.translation = l10n_data.translation
+    GetText.context = l10n_data.context or {}
+    GetText.current_lang = "zh_CN"
+    logger.dbg("audiobook_gettext: loaded embedded zh_CN catalog (" ..
+               (l10n_data.count or "?") .. " entries) via require()")
+else
+    logger.dbg("audiobook_gettext: embedded l10n_zh_CN not found, falling back to PO file")
+
+    -- Fallback: read the PO from disk. Only works when the plugin is an extracted
+    -- directory (not a raw .koplugin ZIP) and l10n/zh_CN/koreader.po is present.
+    local _self_source = debug.getinfo(1, "S").source
+    local function find_l10n_dir()
+        local dirs = {}
+        local here = (_self_source or ""):match("^@(.*/)[^/]*$")
+        if here then
+            dirs[#dirs + 1] = here .. "l10n"
+            dirs[#dirs + 1] = here:gsub("([^/]+)/$", "l10n")
+        end
+        dirs[#dirs + 1] = "./l10n"
         local ok_ds, DataStorage = pcall(require, "datastorage")
         if ok_ds and DataStorage and DataStorage.getDataDir then
-            GetText.dirname = DataStorage:getDataDir() .. "/plugins/audiobook.koplugin/l10n"
+            local base = DataStorage:getDataDir()
+            dirs[#dirs + 1] = base .. "/plugins/audiobook.koplugin/l10n"
+            dirs[#dirs + 1] = base .. "/koreader/plugins/audiobook.koplugin/l10n"
+        end
+        dirs[#dirs + 1] = "/mnt/us/koreader/plugins/audiobook.koplugin/l10n"
+        dirs[#dirs + 1] = "/mnt/sd/koreader/plugins/audiobook.koplugin/l10n"
+        dirs[#dirs + 1] = "/mnt/onboard/koreader/plugins/audiobook.koplugin/l10n"
+        dirs[#dirs + 1] = "/mnt/ext1/koreader/plugins/audiobook.koplugin/l10n"
+
+        for _, d in ipairs(dirs) do
+            local probe = io.open(d .. "/zh_CN/" .. GetText.textdomain .. ".po", "r")
+            if probe then
+                probe:close()
+                return d
+            end
+        end
+        return dirs[1]
+    end
+
+    GetText.dirname = find_l10n_dir()
+
+    -- NOTE: changeLang() resets current_lang to "C" at its start, so we must
+    -- check the result afterwards rather than trusting its return value.
+    local function try_lang(lang)
+        if not lang or lang == "" then
+            return false
+        end
+        GetText.changeLang(lang)
+        return GetText.current_lang ~= "C"
+    end
+
+    local ok_core, core_gettext = pcall(require, "gettext")
+    local _requested_lang = (ok_core and core_gettext and core_gettext.current_lang) or "C"
+
+    if not try_lang("zh_CN") then
+        if _requested_lang and _requested_lang ~= "C" then
+            try_lang(_requested_lang)
         end
     end
-end
 
--- Follow KOReader's active UI language.
-local ok_core, core_gettext = pcall(require, "gettext")
-if ok_core and core_gettext and core_gettext.current_lang then
-    GetText.changeLang(core_gettext.current_lang)
+    if GetText.current_lang == "C" then
+        logger.dbg("audiobook_gettext: no catalog loaded; l10n dir was " .. tostring(GetText.dirname))
+    else
+        logger.dbg("audiobook_gettext: loaded lang=" .. GetText.current_lang .. " from " .. tostring(GetText.dirname))
+    end
 end
 
 return GetText
